@@ -19,6 +19,56 @@ Parameters:
   PrivateSubnetCCIDR:
     Type: String
     Default: "10.0.3.0/24"
+  KeyName:
+    Description: The EC2 Key Pair to allow SSH access to the instance
+    Type: "AWS::EC2::KeyPair::KeyName"
+    Default: "golang"
+  MyIP:
+    Description: IP address allowed to access EC2
+    Type: String
+    Default: "192.168.1.5"
+  DBInstanceName:
+    Type: String
+    Default: "rds"
+  MySQLMajorVersion:
+    Type: String
+    Default: "8.0"
+    AllowedValues: [ "5.6", "5.7", "8.0" ]
+  MySQLMinorVersion:
+    Type: String
+    Default: "20"
+  DBInstanceClass:
+    Type: String
+    Default: "db.t2.micro"
+  DBInstanceStorageSize:
+    Type: String
+    Default: "20"
+  DBInstanceStorageType:
+    Type: String
+    Default: "standard"
+  DBName:
+    Type: String
+    Default: "db"
+  DBMasterUserName:
+    Type: String
+    Default: "dbuser"
+    NoEcho: true
+    MinLength: 1
+    MaxLength: 16
+    AllowedPattern: "[a-zA-Z][a-zA-Z0-9]*"
+    ConstraintDescription: "must begin with a letter and contain only alphanumeric characters."
+  DBPassword:
+    Default: "dbpassword"
+    NoEcho: true
+    Type: String
+    MinLength: 8
+    MaxLength: 41
+    AllowedPattern: "[a-zA-Z0-9]*"
+    ConstraintDescription: "must contain only alphanumeric characters."
+  MultiAZ:
+    Default: "false"
+    Type: String
+    AllowedValues: [ "true", "false" ]
 
 Resources:
   # VPC作成
@@ -192,6 +242,251 @@ Resources:
     Properties:
       SubnetId: !Ref PrivateSubnetC
       RouteTableId: !Ref PrivateRouteTableC
+
+# S3
+  S3Bucket:
+    DeletionPolicy: Delete
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: raisetechcfns3
+      AccessControl: Private
+
+  S3BucketPolicy:
+    DeletionPolicy: Delete
+    Type: "AWS::S3::BucketPolicy"
+    Properties:
+      Bucket: !Ref S3Bucket
+      PolicyDocument:
+        Statement:
+          Action:
+            - "s3:GetObject"
+          Effect: Allow
+          Resource: "arn:aws:s3:::raisetechcfns3/*"
+          Principal: "*"
+
+# ALB
+  # ターゲットグループ
+  TargetGroup:
+    DeletionPolicy: Delete
+    Type: "AWS::ElasticLoadBalancingV2::TargetGroup"
+    Properties:
+      VpcId: !Ref VPC
+      Name: raisetechcfntg
+      Protocol: HTTP
+      Port: 80
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: "/"
+      HealthCheckPort: "traffic-port"
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      HealthCheckTimeoutSeconds: 5
+      HealthCheckIntervalSeconds: 10
+      Matcher:
+        HttpCode: 200
+      Tags:
+        - Key: Name
+          Value: raisetechcfntg
+      TargetGroupAttributes:
+        - Key: "deregistration_delay.timeout_seconds"
+          Value: 300
+        - Key: "stickiness.enabled"
+          Value: false
+        - Key: "stickiness.type"
+          Value: lb_cookie
+        - Key: "stickiness.lb_cookie.duration_seconds"
+          Value: 86400
+      Targets:
+        - Id: !Ref EC2A
+          Port: 80
+        - Id: !Ref EC2C
+          Port: 80
+
+  # ALB
+  InternetALB:
+    DeletionPolicy: Delete
+    Type: "AWS::ElasticLoadBalancingV2::LoadBalancer"
+    Properties:
+      Name: raisetechcfnalb
+      Tags:
+        - Key: Name
+          Value: raisetechcfnalb
+      Scheme: "internet-facing"
+      LoadBalancerAttributes:
+        - Key: "deletion_protection.enabled"
+          Value: false
+        - Key: "idle_timeout.timeout_seconds"
+          Value: 60
+      SecurityGroups:
+        - !Ref ALBSG
+      Subnets:
+        - !Ref PublicSubnetA
+        - !Ref PublicSubnetC
+
+  ALBListener:
+    DeletionPolicy: Delete
+    Type: "AWS::ElasticLoadBalancingV2::Listener"
+    Properties:
+      DefaultActions:
+        - TargetGroupArn: !Ref TargetGroup
+          Type: forward
+      LoadBalancerArn: !Ref InternetALB
+      Port: 80
+      Protocol: HTTP
+
+# EC2
+  # EC2-A
+  EC2A:
+    DeletionPolicy: "Delete"
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-00d101850e971728d
+      KeyName: !Ref KeyName
+      InstanceType: t2.micro
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: "true"
+          DeviceIndex: "0"
+          SubnetId: !Ref PublicSubnetA
+          GroupSet:
+            - !Ref EC2SG
+      UserData: !Base64 |
+        #!/bin/bash
+        sudo yum install -y git
+      Tags:
+        - Key: Name
+          Value: ec2-a
+
+  # EC2-C
+  EC2C:
+    DeletionPolicy: Delete
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-00d101850e971728d
+      KeyName: !Ref KeyName
+      InstanceType: t2.micro
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: "true"
+          DeviceIndex: "0"
+          SubnetId: !Ref PublicSubnetC
+          GroupSet:
+            - !Ref EC2SG
+      UserData: !Base64 |
+        #!/bin/bash
+        sudo yum install -y git
+      Tags:
+        - Key: Name
+          Value: ec2-c
+
+# RDS
+  # RDS-A
+  DBInstance:
+    DeletionPolicy: Delete
+    Type: "AWS::RDS::DBInstance"
+    Properties:
+      DBInstanceIdentifier: raisetechcfnrds
+      Engine: MySQL
+      EngineVersion: !Sub "${MySQLMajorVersion}.${MySQLMinorVersion}"
+      DBInstanceClass: !Ref DBInstanceClass
+      AllocatedStorage: !Ref DBInstanceStorageSize
+      StorageType: !Ref DBInstanceStorageType
+      DBName: !Ref DBName
+      MasterUsername: !Ref DBMasterUserName
+      MasterUserPassword: !Ref DBPassword
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      PubliclyAccessible: false
+      MultiAZ: !Ref MultiAZ
+      # PreferredBackupWindow: "18:00-18:30"
+      # PreferredMaintenanceWindow: "sat:19:00-sat:19:30"
+      AutoMinorVersionUpgrade: false
+      # DBParameterGroupName: !Ref DBParameterGroup
+      VPCSecurityGroups:
+        - !Ref RDSSG
+      CopyTagsToSnapshot: true
+      BackupRetentionPeriod: 7
+      Tags:
+        - Key: "Name"
+          Value: !Ref DBInstanceName
+
+  # DBパラメータグループ
+  # DBParameterGroup:
+  #   Type: "AWS::RDS::DBParameterGroup"
+  #   Properties:
+  #     Family: !Sub "MySQL${MySQLMajorVersion}"
+  #     Description: !Sub "${PJPrefix}-${DBInstanceName}-parm"
+  #
+  #     # ルール
+  #     SecurityGroupIngress:
+  #       - IpProtocol: tcp
+  #         FromPort: 3306
+  #         ToPort: 3306
+  #         CidrIp: { "Fn::ImportValue": !Sub "${PJPrefix}-vpc-cidr" }
+
+  # DBサブネットグループ
+  DBSubnetGroup:
+    DeletionPolicy: Delete
+    Type: "AWS::RDS::DBSubnetGroup"
+    Properties:
+      DBSubnetGroupName: cfn_db_subnet_group
+      DBSubnetGroupDescription: "-"
+      SubnetIds:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetC
+
+# セキュリティグループ
+  # EC2用
+  EC2SG:
+    DeletionPolicy: Delete
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: ec2-sg
+      GroupDescription: Allow SSH and HTTP access only MyIP
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        # http
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref ALBSG
+
+        # ssh
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 127.0.0.1/32
+          # CidrIp: !Ref MyIP
+
+  # RDS用
+  RDSSG:
+    DeletionPolicy: Delete
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: rds-sg
+      GroupDescription: Allow only MySQL/Aurora
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        # MySQL/Aurora
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref EC2SG
+
+  # ALB用
+  ALBSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VPC
+      GroupName: alb-sg
+      GroupDescription: "-"
+      SecurityGroupIngress:
+        # http
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
 
 # アウトプット変数
 Outputs:
